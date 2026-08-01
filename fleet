@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# fleet — Phase 5. Thin wrapper over the scripts proven in Phases 1/3/4.
+# No new capability here — this only makes what already works reachable
+# through one consistent entrypoint, for humans and agents alike.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${HOME}/.config/proxmox-ops/token.env"
+INVENTORY_JSON="${HOME}/.config/proxmox-ops/inventory.json"
+
+die() { echo "fleet: $*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: fleet <command> [args...]
+
+  fleet list                    List known VMs/CTs (name, ip, type, vmid)
+  fleet ssh <name> [cmd...]     SSH into a VM/CT by name
+  fleet exec-all <cmd...>       Run a command on every reachable guest
+  fleet host [cmd...]           SSH/run on the Proxmox host itself
+  fleet create-vm <name> [...]  Create a VM (wraps create_vm.sh — see its
+                                 own --help for flags; dry-run by default)
+  fleet delete-vm <vmid> [...]  Delete a VM (wraps delete_vm.sh — dry-run
+                                 by default, same safety rails apply)
+  fleet refresh                 Re-run inventory discovery now
+
+Default scope is the whole known fleet — there is no per-machine opt-in
+step. New VMs created via `fleet create-vm` are auto-discovered on their
+next `fleet refresh` (or immediately, since create-vm refreshes for you).
+EOF
+  exit 2
+}
+
+require_inventory() {
+  [[ -f "${INVENTORY_JSON}" ]] || die "no inventory yet — run 'fleet refresh' first"
+}
+
+cmd_list() {
+  require_inventory
+  jq -r '["NAME","ALIAS","IP","TYPE","VMID"], (.[] | [.name,.alias,.ip,.type,.vmid])
+    | @tsv' "${INVENTORY_JSON}" | column -t -s $'\t'
+}
+
+cmd_ssh() {
+  local name="${1:?Usage: fleet ssh <name> [cmd...]}"; shift || true
+  require_inventory
+  local alias
+  alias="$(jq -r --arg n "${name}" '.[] | select(.name==$n or .alias==$n) | .alias' "${INVENTORY_JSON}" | head -n1)"
+  [[ -n "${alias}" ]] || die "no known guest matching '${name}' — try 'fleet list' or 'fleet refresh'"
+  exec ssh "${alias}" "$@"
+}
+
+cmd_exec_all() {
+  [[ $# -ge 1 ]] || die "Usage: fleet exec-all <cmd...>"
+  require_inventory
+  local failures=0
+  while IFS= read -r alias; do
+    echo "== ${alias} =="
+    if ! ssh -o ConnectTimeout=10 "${alias}" "$@"; then
+      echo "   (failed: ${alias})" >&2
+      ((failures++)) || true
+    fi
+  done < <(jq -r '.[].alias' "${INVENTORY_JSON}")
+  [[ "${failures}" -eq 0 ]] || die "${failures} host(s) failed"
+}
+
+cmd_host() {
+  [[ -f "${CONFIG_FILE}" ]] || die "missing ${CONFIG_FILE} — run setup.sh first"
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+  [[ -n "${PVE_HOST:-}" ]] || die "${CONFIG_FILE} missing PVE_HOST"
+  echo "fleet: connecting to the Proxmox host itself." >&2
+  echo "fleet: this repo intentionally has no standing SSH credential for" >&2
+  echo "       host access (see rafael-systems non-goals) — use your own." >&2
+  exec ssh "${PVE_HOST}" "$@"
+}
+
+cmd_create_vm() {
+  [[ $# -ge 1 ]] || die "Usage: fleet create-vm <name> [--yes] [--cores N] [--memory MB] [--vmid N]"
+  "${SCRIPT_DIR}/create_vm.sh" "$@"
+  if [[ " $* " == *" --yes "* ]]; then
+    echo "fleet: refreshing inventory so the new guest is immediately reachable..."
+    "${SCRIPT_DIR}/fleet-inventory.sh" || echo "fleet: refresh failed — run 'fleet refresh' manually once it's booted" >&2
+  fi
+}
+
+cmd_delete_vm() {
+  [[ $# -ge 1 ]] || die "Usage: fleet delete-vm <vmid> [--yes]"
+  "${SCRIPT_DIR}/delete_vm.sh" "$@"
+}
+
+cmd_refresh() {
+  "${SCRIPT_DIR}/fleet-inventory.sh"
+}
+
+[[ $# -ge 1 ]] || usage
+command="$1"; shift || true
+
+case "${command}" in
+  list)       cmd_list "$@" ;;
+  ssh)        cmd_ssh "$@" ;;
+  exec-all)   cmd_exec_all "$@" ;;
+  host)       cmd_host "$@" ;;
+  create-vm)  cmd_create_vm "$@" ;;
+  delete-vm)  cmd_delete_vm "$@" ;;
+  refresh)    cmd_refresh "$@" ;;
+  -h|--help)  usage ;;
+  *)          die "unknown command: ${command} (see --help)" ;;
+esac
