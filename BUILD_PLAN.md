@@ -139,6 +139,50 @@ not expose more than what's confirmed here.
 
 ---
 
+## PHASE 7 — Human-facing start/stop CLI
+
+Goal: let `proxmox-monitor`'s dashboard (and direct terminal use) start
+and stop existing VMs/CTs, without going through the MCP-only agent
+path and without that dashboard ever holding a mutating credential of
+its own.
+
+Context: Phase 6 already proved `fleet_start`/`fleet_stop` work safely
+for agents, on a token scoped to `VM.PowerMgmt` + `VM.Snapshot` only —
+no `VM.Allocate`/`VM.Clone`, so it can't create or destroy anything.
+There's currently no equivalent for a human outside that MCP path;
+`fleet` itself only exposes `list`/`ssh`/`exec-all`/`host`/`create-vm`/
+`delete-vm`/`refresh`.
+
+Steps:
+- New scoped API token, `VM.PowerMgmt` only (narrower than the MCP
+  token — this path never needs `VM.Snapshot`). Verify the permission
+  name against the live API before assuming it's still called that.
+- `fleet start <name|vmid>` / `fleet stop <name|vmid>`: resolve via
+  the existing inventory, POST `status/start` or `status/stop`, poll
+  for the state to actually change, print the result. No confirmation
+  prompt — start/stop are both reversible (a stopped VM can always be
+  started again), matching the MCP server's own no-confirmation
+  precedent for these two actions specifically. This is a deliberate
+  difference from create/delete, not an inconsistency.
+- **Create and delete stay out of `proxmox-monitor`'s dashboard
+  entirely.** This mirrors Phase 6's own rule for the MCP server —
+  anything irreversible only ever happens through `fleet`'s existing
+  confirm-gated CLI path, run by a human in a terminal, never from a
+  live-refreshing dashboard where a keystroke could be mistimed.
+- Dashboard side (in `proxmox-monitor`, a separate repo, tracked
+  there): an inline start/stop control per VM row, with real mouse
+  click support in the TUI (kitty SGR mouse reporting) rather than a
+  keyboard-only selection scheme — tested in isolation before it's
+  wired to a real start/stop call.
+
+STOP: test `fleet start`/`fleet stop` against the existing disposable
+test VM (`phase3-throwaway`, vmid 200) before wiring anything into the
+dashboard. Confirm mouse-click parsing works correctly in isolation
+(a throwaway test harness, not the real dashboard) before connecting
+it to a call that actually starts or stops a real guest.
+
+---
+
 ## Notes for whoever (human or agent) picks up a phase
 
 - Every phase's STOP is a real stop, not a formality — the ACL list
