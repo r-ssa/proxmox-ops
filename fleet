@@ -23,6 +23,10 @@ Usage: fleet <command> [args...]
                                  own --help for flags; dry-run by default)
   fleet delete-vm <vmid> [...]  Delete a VM (wraps delete_vm.sh — dry-run
                                  by default, same safety rails apply)
+  fleet start <name|vmid>       Start a stopped VM/CT (no confirmation —
+                                 reversible)
+  fleet stop <name|vmid>        Stop a running VM/CT (no confirmation —
+                                 reversible)
   fleet refresh                 Re-run inventory discovery now
 
 Default scope is the whole known fleet — there is no per-machine opt-in
@@ -94,6 +98,34 @@ cmd_refresh() {
   "${SCRIPT_DIR}/fleet-inventory.sh"
 }
 
+resolve_guest() {
+  # Resolves via the local inventory (built by a token that has audit
+  # rights) — power_vm.sh's own token deliberately cannot look guests
+  # up itself. Prints "vmid node type" on a single line.
+  local target="$1"
+  require_inventory
+  local match
+  match="$(jq -r --arg t "${target}" \
+    '[.[] | select(.vmid==$t or .name==$t)] | if length==1 then .[0] | "\(.vmid) \(.node) \(.type)" else empty end' \
+    "${INVENTORY_JSON}")"
+  [[ -n "${match}" ]] || die "no unique guest matching '${target}' in inventory — try 'fleet list' or 'fleet refresh'"
+  echo "${match}"
+}
+
+cmd_start() {
+  local target="${1:?Usage: fleet start <name|vmid>}"
+  local vmid node gtype
+  read -r vmid node gtype < <(resolve_guest "${target}")
+  "${SCRIPT_DIR}/power_vm.sh" start "${vmid}" "${node}" "${gtype}"
+}
+
+cmd_stop() {
+  local target="${1:?Usage: fleet stop <name|vmid>}"
+  local vmid node gtype
+  read -r vmid node gtype < <(resolve_guest "${target}")
+  "${SCRIPT_DIR}/power_vm.sh" stop "${vmid}" "${node}" "${gtype}"
+}
+
 [[ $# -ge 1 ]] || usage
 command="$1"; shift || true
 
@@ -104,6 +136,8 @@ case "${command}" in
   host)       cmd_host "$@" ;;
   create-vm)  cmd_create_vm "$@" ;;
   delete-vm)  cmd_delete_vm "$@" ;;
+  start)      cmd_start "$@" ;;
+  stop)       cmd_stop "$@" ;;
   refresh)    cmd_refresh "$@" ;;
   -h|--help)  usage ;;
   *)          die "unknown command: ${command} (see --help)" ;;
