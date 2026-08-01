@@ -183,6 +183,48 @@ it to a call that actually starts or stops a real guest.
 
 ---
 
+## PHASE 8 — Dashboard-triggered VM creation (create only, not delete)
+
+Goal: let the dashboard create a new VM via `create_vm.sh`'s existing
+`--yes`-gated path. Explicitly does NOT add delete to the dashboard —
+that stays CLI-only, unchanged from every prior phase. The user's own
+reasoning: creation is already less locked-down than delete
+(`create_vm.sh`'s own comment: "reversible... deliberately less
+locked-down than delete"), so the same asymmetry that already exists
+between `create_vm.sh` and `delete_vm.sh` carries into the dashboard.
+
+Context: the dashboard's input model is single-keystroke only (`b`,
+row-clicks) — no text-entry field exists, and building one is out of
+scope for this phase. Naming needs to work without it.
+
+Steps:
+- No new credential. `fleet create-vm` already exists and already
+  uses the full `ops-fleet` token (`VM.Allocate`/`VM.Clone`/etc) —
+  the dashboard still never holds that token itself, it just shells
+  out to `fleet create-vm`, same delegation pattern as backups and
+  Phase 7's power control.
+- Naming: the dashboard computes the next free vmid itself (lowest
+  integer >= 200 not already in the current guest list — the same
+  guest list it already has from `proxmox_monitor.py`, no extra API
+  call needed) and names the VM after that vmid (e.g. `201`), passing
+  both `--vmid` and the name explicitly so they can't drift apart.
+  `create_vm.sh`'s own collision check is the safety net if two
+  things race for the same id — not re-implemented here.
+- UX: press `c` to show a preview (vmid/name, cores, memory — from
+  the same config `create_vm.sh` already reads defaults from), press
+  `y` to confirm, any other key cancels. All single-keystroke,
+  consistent with the rest of the dashboard. Output streamed live,
+  same pattern as the manual backup trigger.
+- Delete stays entirely unreachable from the dashboard — not a
+  placeholder to fill in later, a deliberate line matching Phase 6's
+  own MCP rule and Phase 7's own reasoning.
+
+STOP: confirm the vmid/name preview renders correctly and the
+computed next-free-vmid is actually correct against live inventory
+before wiring the `y` confirm to a real `create_vm.sh --yes` call.
+
+---
+
 ## Notes for whoever (human or agent) picks up a phase
 
 - Every phase's STOP is a real stop, not a formality — the ACL list
